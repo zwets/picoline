@@ -254,7 +254,6 @@ class SubprocessScheduler:
                 self._free_spc -= job.spec.spc
             else: # mark ourselves dirty as a job has FAILED/COMPLETED
                 self._dirty = True
-            self.emit('job start: %s -> %s', job.name, job.state.value)
 
 
     def poll(self):
