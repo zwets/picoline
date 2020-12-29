@@ -213,7 +213,7 @@ class SubprocessScheduler:
         # Mark dirty if the job is done already, so next listen() returns immediately
         self._dirty = self._dirty or job.state in [ Job.State.COMPLETED, Job.State.FAILED ]
         
-        self.emit('job schedule: %s -> %s', job.name, job.state.value)
+        self.emit('job schedule: %s -> %s', job.name, job.state.value.lower())
 
         return job
 
@@ -221,6 +221,18 @@ class SubprocessScheduler:
     def listen(self):
         '''Block until a job becomes COMPLETED/FAILED and return True, or return
            False if no more jobs are QUEUED/RUNNING.'''
+
+        # On entering listen, if verbose, dump state
+        if not self._quiet:
+            n_in_state = lambda s: sum(map(lambda x: x.state == s, self._jobs.values()))
+            self.emit('enter listen: queued:%d running:%d done:%d failed:%d (c:%d/%d m:%d/%d s:%d/%d)',
+                n_in_state(Job.State.QUEUED),
+                n_in_state(Job.State.RUNNING),
+                n_in_state(Job.State.COMPLETED),
+                n_in_state(Job.State.FAILED),
+                (self._tot_cpu - self._free_cpu), self._tot_cpu,
+                (self._tot_mem - self._free_mem), self._tot_mem,
+                (self._tot_spc - self._free_spc), self._tot_spc)
 
         # Poll until we become dirty or no QUEUED/RUNNING jobs are left
         while not self._dirty \
@@ -239,7 +251,6 @@ class SubprocessScheduler:
         ret = self._dirty
         self._dirty = False
 
-        self.emit('job listen: -> %s', ret)
         return ret
 
 
@@ -263,7 +274,7 @@ class SubprocessScheduler:
         for job in filter(lambda j: j.state == Job.State.RUNNING, self._jobs.values()):
             new_state = job.poll()
             if new_state != Job.State.RUNNING:
-                self.emit('job poll: %s -> %s', job.name, new_state.value)
+                self.emit('job ended: %s -> %s', job.name, new_state.value.lower())
                 self._free_cpu += job.spec.cpu
                 self._free_mem += job.spec.mem
                 self._free_spc += job.spec.spc
@@ -273,6 +284,8 @@ class SubprocessScheduler:
         if self._dirty:
             for job in filter(lambda j: j.state == Job.State.QUEUED, self._jobs.values()):
                 self.try_start(job)
+                if not self._quiet and job.state != Job.State.QUEUED:
+                    self.emit('job dequeued: %s -> %s', job.name, job.state.value.lower())
 
 
     def stop(self, fail_msg):
@@ -290,19 +303,8 @@ class SubprocessScheduler:
     def emit(self, fmt, *args):
         '''Send string to stderr if we are not quiet.'''
 
-        n_in_state = lambda s: sum(map(lambda x: x.state == s, self._jobs.values()))
-
         if not self._quiet:
-            print('log:',  (fmt % args), 
-                '[queue=%d running=%d done=%d fail=%d cpu=%d/%d mem=%d/%d spc=%d/%d]' % (
-                    n_in_state(Job.State.QUEUED),
-                    n_in_state(Job.State.RUNNING),
-                    n_in_state(Job.State.COMPLETED),
-                    n_in_state(Job.State.FAILED),
-                    (self._tot_cpu - self._free_cpu), self._tot_cpu,
-                    (self._tot_mem - self._free_mem), self._tot_mem,
-                    (self._tot_spc - self._free_spc), self._tot_spc),
-                file=sys.stderr, flush=True)
+            print('log:',  (fmt % args), file=sys.stderr, flush=True)
 
 ### MAIN
 #
