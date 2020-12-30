@@ -54,6 +54,7 @@
 #     UserTargets.DEFAULT: ALL(UserTargets.SPECIES, UserTargets.MLST, UserTargets.RESISTANCE, ...),
 #     UserTargets.SPECIES: Checkpoints.SPECIES,
 #     UserTargets.RESISTANCE: ALL(Services.RESFINDER, OPT(Services.PointFinder))
+#     # Checkpoints are intermediate targets that can be attained in multiple ways
 #     Checkpoint.CONTIGS: ONE(Params.CONTIGS, Services.ASSEMBLER),
 #     Checkpoint.SPECIES: ONE(Params.SPECIES, Services.KMERFINDER, Services.KCST),
 #     Services.KMERFINDER: ONE(Params.READS, Checkpoint.CONTIGS),
@@ -70,26 +71,30 @@
 #      w = Workflow(
 #           sample_deps,            # the dependency dict as above 
 #           [Params.READS],         # list of Params enums marking provided inputs
-#           [UserTargets.DEFAULT]   # list of UserTargets to attain
+#           [UserTargets.DEFAULT],  # list of UserTargets to attain
 #           [UserTargets.CGMLST])   # list of UserTargets a/o Services to exclude
 #
 #   Query it for its initial status and runnable services:
 #
-#      w.status()       # -> "Incomplete" (or "Done" or "Failed")
-#      w.runnables()    # -> Services.KMERFINDER, Services.RESFINDER
+#      w.status()         # -> RUNNABLE (or COMPLETED or FAILED)
+#      w.list_runnable()  # -> Services.KMERFINDER, Services.RESFINDER
 #
-#   The executor should tell Workflow w when it starts running a service:
+#   The executor tells the Workflow w when it starts running a service:
 #
 #      w.mark_started(Services.KMERFINDER)
-#      w.runnables()    # -> Services.RESFINDER
+#      w.list_runnable()  # -> Services.RESFINDER
+#      w.list_started()   # -> Services.KMERFINDER
 #    
-#   When a service has completed, the executor should tell Workflow:
+#   When a service has completed or failed, the executor tells the Workflow:
 #
 #      w.mark_completed(Services.KMERFINDER)
-#      w.runnables()    # -> Services.MLST, Services.RESFINDER, Services.PointFinder ...
 #
-#   Note how the runnables() list now contains services that depend on SPECIES,
-#   and hence had to wait for KmerFinder to complete.
+#   This updates the state of the workflow and new services may become runnable:
+#
+#      w.list_runnable()  # -> .., Services.MLST, Services.POINTFINDER, ...
+#
+#   Here we see species-dependent services being unleashed by KmerFinder's
+#   completion, which attained Checkpoint.SPECIES, which they depended upon.
 #
 
 import enum, functools, operator
@@ -109,12 +114,13 @@ class Target(enum.Enum):
     '''The base enum for our five types of targets.'''
 
     def runnables(self, deps, done, wont):
-        '''Return the runnables up to this target.  Runnables are those services
-           that don't depend on prerequisites that have not yet run.
+        '''Return the runnables up to and including this target.  Runnables are
+           those services that don't depend on prereqs that are not yet done.
            Parameters: deps is the dict holding dependencies, done is the list of
-           completed targets, wont is the list of unattainable targets.
-           Return value: None if we or our dependencies fail, an empty list if we
-           and our dependencies are already done; a list of runnables otherwise.'''
+           completed targets, wont is the list of unattainable targets (failed or
+           skipped).
+           Return value: None if self or its prereqs fail, an empty list if self
+           and its deps are already done; a list of runnables otherwise.'''
         if self in done:
             return list()
         elif self in wont or isinstance(self,Params):
@@ -126,7 +132,7 @@ class Target(enum.Enum):
                 return None
             if pre:         # we depend on runnables, so we return those
                 return pre
-            else:           # we are the single runnable if we are a service
+            else:           # we are the sole runnable if we are a service
                 return [self] if isinstance(self, Services) else list()
 
 # The four subclasses (enums) of Target
@@ -139,15 +145,16 @@ class UserTargets(Target): pass
 
 ### Target connectors
 #
-# This section defines the target connectors.  Like the Targets, each of these
-# has a runnables() method that return the list of runnable services.
+# This section defines the connectors to combine targets: ALL, SEQ, ONE,
+# OPT, OIF.  Like the Targets, each of these has a runnables() method that
+# recurses down its dependents.
 
 class Connector:
     '''Base class for the ALL, SEQ, ONE, etc connectors.'''
 
     def set_clauses(self, *clauses):
         '''Store the clauses on self, catering for both lists and tuples,
-           and check that all clauses are either of Target or Connector type.'''
+           and assert that all clauses are either of Target or Connector type.'''
         self.clauses = tuple(clauses[0] if len(clauses) == 1 else clauses)
         for c in self.clauses: 
             assert isinstance(c,(Target,Connector))
@@ -241,6 +248,10 @@ class OIF(Connector):
 #   This section defines the actual Workflow class.
 
 class Workflow:
+    '''An instance of this class manages the workflow logic of a single
+       execution of the workflow defined by the set of dependency rules,
+       user-requested targets, and user-provided inputs pass into its
+       constructor.'''
 
     class Status(enum.Enum):
         RUNNABLE = 'RUNNABLE'
@@ -260,6 +271,7 @@ class Workflow:
     _started = set()
     _completed = set()
     _failed = set()
+    _skipped = set()
 
     # Construct and initialise
     def __init__(self,deps,params,targets,excludes):
@@ -280,7 +292,7 @@ class Workflow:
 
         # Setup the initial completed and failed sets with the params and excludes
         self._completed.update(params)
-        self._failed.update(excludes)
+        self._skipped.update(excludes)
 
         # And reassess to update self's status
         self._reassess()
@@ -291,7 +303,8 @@ class Workflow:
            the runnable services, and updates the state lists and status field.'''
 
         # Collect the runnable services
-        self._runnable = ALL(self._usertargets).runnables(self._deps, self._completed, self._failed)
+        wont_set = set(
+        self._runnable = ALL(self._usertargets).runnables(self._deps, self._completed, self._failed.union(self._skipped))
 
         # If None then the user targets are not resolvable and workflow fails
         if self._runnable is None:
@@ -332,6 +345,11 @@ class Workflow:
         '''Returns the list of unsuccessfully completed services.'''
         return list(filter(lambda t: isinstance(t, Services), self._failed))
 
+    def list_skipped(self):
+        '''Returns the list of services that were skipped.  Semantically
+           the same as failed, except they never ran.'''
+        return list(filter(lambda t: isinstance(t, Services), self._skipped))
+
     # Update methods for the state of the Workflow
 
     def mark_started(self, service):
@@ -365,5 +383,16 @@ class Workflow:
         else:
             raise(ValueError("service was not runnable or started: %s" % service))
         self._failed.add(service)
+        self._reassess()
+
+    def mark_skipped(self, service):
+        '''Marks service as having moved from runnable to skipped (never having run).'''
+        if service in self._runnable:
+            self._runnable.remove(service)
+        elif service in self._skipped:
+            pass
+        elif service in self._started.union(self._completed).union(self._failed):
+            raise(ValueError("service cannot be skipped after it was started: %s" % service))
+        self._skipped.add(service)
         self._reassess()
 

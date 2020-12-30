@@ -16,7 +16,7 @@
 #
 #   An Executor instance controls a single run of a pipeline from start to end.
 #   It does this by starting services according to the state of a workflow,
-#   encapsulated in the pico.workflow.logic.Workflow object passed to it.
+#   encapsulated in the .logic.Workflow object passed to it.
 #
 #   At any time, the Workflow will indicate which services are 'runnable'. The
 #   executor then invokes the execute() method on the service, passing in the
@@ -30,15 +30,15 @@
 #
 #   The implementation is poll-based because the legacy backends run as async
 #   processes, and the Python docs recommend against combining threads and
-#   processes (else a thread & event model would have been preferable).
+#   processes (otherwise a thread & event model would have been more obvious).
 #   The polling frequency is set in the JobScheduler.
 #
 # Conceptual mode of use:
 #
-#      blackboard = workflow.blackboard.Blackboard()
-#      blackboard['inputs'] = { 'contigs': /path/to/inputs, ... }
-#      workflow = workflow.logic.Workflow(deps, inputs, targets)
-#      executor = workflow.executor.Executor(workflow, services, scheduler)
+#      blackboard = .blackboard.Blackboard()
+#      blackboard['inputs'] = { 'contigs': '/path/to/inputs', ... }
+#      workflow = .logic.Workflow(deps, inputs, targets)
+#      executor = .executor.Executor(workflow, services, scheduler)
 #
 #      status = executor.execute(blackboard)
 #      results = blackboard.get(...)           
@@ -192,9 +192,11 @@ class Executor:
         # Workflow is done, log result
         str_done = ', '.join(map(lambda s: s.value, self._workflow.list_completed()))
         str_fail = ', '.join(map(lambda s: s.value, self._workflow.list_failed()))
+        str_skip = ', '.join(map(lambda s: s.value, self._workflow.list_skipped()))
         self._blackboard.log("workflow execution completed")
         self._blackboard.log("- done: %s", str_done if str_done else "(none)")
-        self._blackboard.log("- failed/excluded: %s", str_fail if str_fail else "(none)")
+        self._blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
+        self._blackboard.log("- skipped: %s", str_skipped if str_skipped else "(none)")
 
         return wf_status
 
@@ -256,6 +258,8 @@ class Executor:
             assert r not in self._executions or self._executions[r].state == Execution.State.FAILED
         for r in self._workflow.list_completed():
             assert r not in self._executions or self._executions[r].state == Execution.State.COMPLETED
+        for r in self._workflow.list_skipped():
+            assert r not in self._executions
 
         for j in self._executions.keys():
             state = self._executions[j].state
