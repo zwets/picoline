@@ -303,7 +303,6 @@ class Workflow:
            the runnable services, and updates the state lists and status field.'''
 
         # Collect the runnable services
-        wont_set = set(
         self._runnable = ALL(self._usertargets).runnables(self._deps, self._completed, self._failed.union(self._skipped))
 
         # If None then the user targets are not resolvable and workflow fails

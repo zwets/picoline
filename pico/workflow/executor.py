@@ -196,7 +196,7 @@ class Executor:
         self._blackboard.log("workflow execution completed")
         self._blackboard.log("- done: %s", str_done if str_done else "(none)")
         self._blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
-        self._blackboard.log("- skipped: %s", str_skipped if str_skipped else "(none)")
+        self._blackboard.log("- skipped: %s", str_skip if str_skip else "(none)")
 
         return wf_status
 
@@ -209,11 +209,15 @@ class Executor:
         if not service:
             raise ValueError("no implementation for service id: %s" % svc_id.value)
 
-        self._blackboard.log("service start: %s" % svc_id.value)
+        try:
+            execution = service.execute(svc_id.value, self._blackboard, self._scheduler)
+            self._blackboard.log("service start: %s" % svc_id.value)
+            self._executions[svc_id] = execution
+            self.update_state(svc_id, execution.state)
 
-        execution = service.execute(svc_id.value, self._blackboard, self._scheduler)
-        self._executions[svc_id] = execution
-        self.update_state(svc_id, execution.state)
+        except Exception as e:
+            self._blackboard.log("service skipped: %s: %s", svc_id.value, str(e))
+            self._workflow.mark_skipped(svc_id)
 
 
     def poll_service(self, svc_id):
