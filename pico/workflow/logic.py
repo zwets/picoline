@@ -185,7 +185,7 @@ class SEQ(Connector):
 
     def runnables(self, deps, done, wont):
         '''Return the runnables from the first clause that has any, but fail
-           if any clause is bound to fail.'''
+           if any later clause is bound to fail.'''
         ret = None
         for sub in self.clauses:
             run = sub.runnables(deps, done, wont)
@@ -196,7 +196,7 @@ class SEQ(Connector):
         return ret
 
 class ONE(Connector):
-    '''Connector with clauses of which at least one must to be met.'''
+    '''Connector with clauses of which at least one must be met.'''
 
     def __init__(self, *clauses): 
         self.set_clauses(*clauses)
@@ -228,7 +228,8 @@ class OPT(Connector):
         return run
 
 class OIF(Connector):
-    '''Unary connector which succeeds only if its clause succeeds.'''
+    '''Unary connector which succeeds only if its clause succeeds, but does
+       not trigger the clause to execute.'''
 
     def __init__(self, clause):
         self.clause = clause

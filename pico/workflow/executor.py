@@ -23,10 +23,10 @@
 #   blackboard and job scheduler.  The service returns an Execution object that
 #   the executor monitors.
 #
-#   The Executor polls the scheduler, which polls the backends, for their actual
-#   status, and updates the Workflow accordingly when they complete or fail.
-#   The Workflow object will then present new runnable services, until the
-#   execution as a whole has completed.
+#   The Executor polls the scheduler, which polls the backends, for their
+#   updated status, and updates the Workflow accordingly when they complete
+#   or fail.  The Workflow object will then present new runnable services,
+#   until the execution as a whole has completed.
 #
 #   The implementation is poll-based because the legacy backends run as async
 #   processes, and the Python docs recommend against combining threads and

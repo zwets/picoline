@@ -4,7 +4,7 @@ _Simplistic workflow and job control for on-machine pipelines_
 
 This Python package contains the generic workflow and job control mechanisms used
 by the [KCRI CGE Bacterial Analysis Pipeline](https://github.com/zwets/kcri-cge-bap)
-and [KCRI Assembly and Quality Analysis Pipeline](https://github.com/zwets/kcri-qap).
+and [KCRI QA and Assembly Pipeline](https://github.com/zwets/kcri-qaap).
 
 
 ## Background
@@ -26,7 +26,7 @@ And all of this in pure Python, that is, embeddable in a Python program,
 without further requirements or system dependencies.
 
 The rationale for not building this functionality on top of (the obvious)
-workflow engine a/o job control system is that the BAP and QAP are intended
+workflow engine a/o job control system is that the BAP and QAAP are intended
 to run on laptops "in the field", rather than on an HPC.
 
 See the [BAP](https://github.com/zwets/kcri-cge-bap) documentation for more
@@ -45,7 +45,7 @@ Documentation is in the header comments of the modules:
    has a `main()` function and can be used from the command-line)
 
 Helpful documentation of a complete use case can be found in the code of the
-KCRI CGE BAP at <https://github.com/zwets/kcri-cge-bap>.  The `workflow.py`
+[KCRI CGE BAP](https://github.com/zwets/kcri-cge-bap).  The `workflow.py`
 module in that repository has a CLI tester for workflow definitions.
 
 
