@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# pico.workflow.executor - manages the execution of a Workflow
+# pico.workflow.executor - manages the execution of workflows
 #
 # Background
 #
@@ -9,10 +9,11 @@
 #   of a generic workflow definition language and execution engine.
 #
 #   This module defines the Executor and Execution classes.  Execution is
-#   intended to be subclassed by each backend-specific shim.  The subclass
-#   must implement the report() method to report the backend status.
+#   intended to be subclassed by each backend-specific shim.  This subclass
+#   is returned by the shim's Service.execute() implementation.  The subclass
+#   must implement virtual method report() to report its backend status.
 #
-# How it works:
+# How it works (see pseudo-code below):
 #
 #   An Executor instance controls a single run of a pipeline from start to end.
 #   It does this by starting services according to the state of a workflow,
@@ -20,12 +21,12 @@
 #
 #   At any time, the Workflow will indicate which services are 'runnable'. The
 #   executor then invokes the execute() method on the service, passing in the
-#   blackboard and job scheduler.  The service returns an Execution object that
-#   the executor monitors.
+#   blackboard and job scheduler.  The service returns the Execution object
+#   that the executor monitors.
 #
 #   The Executor polls the scheduler, which polls the backends, for their
 #   updated status, and updates the Workflow accordingly when they complete
-#   or fail.  The Workflow object will then present new runnable services,
+#   or fail.  The Workflow object will then present next runnable services,
 #   until the execution as a whole has completed.
 #
 #   The implementation is poll-based because the legacy backends run as async
@@ -40,8 +41,8 @@
 #      workflow = .logic.Workflow(deps, inputs, targets)
 #      executor = .executor.Executor(workflow, services, scheduler)
 #
-#      status = executor.execute(blackboard)
-#      results = blackboard.get(...)           
+#      status = executor.execute(execution_id, blackboard)
+#      results = blackboard.get(...)
 #
 
 import enum
@@ -52,7 +53,7 @@ from .logic import Workflow, Services as ServicesEnum
 #
 #   Base class for the service executions, i.e. objects returned from the shims'
 #   execute() method.  Subclasses must implement its report() method to retrieve
-#   the backend status and output, and wrangle this on to the black board.
+#   the backend status, and wrangle its output on to the black board.
 
 class Execution:
     '''Base class for a single service execution, maintains the execution state.'''
@@ -62,18 +63,38 @@ class Execution:
         COMPLETED = 'COMPLETED'
         FAILED = 'FAILED'
 
-    _state = None
-    _ident = None
-    _error = None
+    _sid = None     # Service ID
+    _xid = None     # Workflow execution ID
+    _state = None   # Current state of the service execution
+    _error = None   # Set to error string on execution failure
 
-    def __init__(self, ident):
-        '''Return a execution with the given execution id, which is the
-           key it must report its results under.  Its state is None.'''
-        self._ident = ident
+    def __init__(self, sid, xid = None):
+        '''Construct an execution with the given service id and workflow id.
+           Without xid, there can be only one workflow invocation, and hence
+           each Service can be invoked only once (as in 1.1.x).'''
+        self._sid = sid
+        self._xid = xid
+
+    @property
+    def sid(self):
+        '''Service ID for which this is an execution.'''
+        return self._sid
+
+    @property
+    def xid(self):
+        '''Workflow execution ID of which this service invocation is part.'''
+        return self._xid
+
+    @property
+    def id(self):
+        '''Convenience property that returns the tuple (sid,xid).'''
+        return (self._sid, self._xid)
 
     @property
     def ident(self):
-        return self._ident
+        '''Unique identifier of this service execution within the executor.
+           Equal to sid if xid is None (as in 1.1.x) else string sid[xid].'''
+        return self._sid if not self._xid else '%s[%s]' % self.id
 
     @property
     def state(self):
@@ -144,23 +165,25 @@ class Executor:
         self._scheduler = scheduler
 
 
-    def execute(self, blackboard):
-        '''Execute the workflow.'''
+    def execute(self, blackboard, wx_id = None):
+        '''Execute the workflow, optionally with a workflow execution ID.'''
+
+        wx_name = "workflow" if not wx_id else "workflow[%s]" % wx_id
 
         # Create the blackboard for communication between services
         self._blackboard = blackboard
-        self._blackboard.log("execution starting")
+        self._blackboard.log("executor starting %s", wx_name)
 
         # Obtain the status of the Workflow object to control our execution
-        wf_status = self._workflow.status
-        self._blackboard.log("workflow status: %s", wf_status.value)
-        assert wf_status != Workflow.Status.WAITING, "no services were started yet"
+        wx_status = self._workflow.status
+        self._blackboard.log("%s status: %s", wx_name, wx_status.value)
+        assert wx_status != Workflow.Status.WAITING, "no services were started yet"
 
         # We run as long as there are runnable or running services in the Workflow
-        while wf_status in [ Workflow.Status.RUNNABLE, Workflow.Status.WAITING ]:
+        while wx_status in [ Workflow.Status.RUNNABLE, Workflow.Status.WAITING ]:
 
             # Check that the Workflow and our idea of runnable and running match
-            self.assert_cross_check()
+            self.assert_cross_check(wx_id)
             more_jobs = True
 
             # Pick the first runnable off the runnables list, if any
@@ -168,77 +191,89 @@ class Executor:
             if runnable:
                 # Look up the service and start it
                 svc_ident = runnable[0]
-                self.start_service(svc_ident)
+                self.start_service(svc_ident, wx_id)
 
             else:
                 # Nothing runnable, wait on the scheduler for job to end
                 more_jobs = self._scheduler.listen()
 
                 # Update all started executions with job state
-                for svc_id, execution in self._executions.items():
+                for sx_id, execution in self._executions.items():
                     if execution.state == Execution.State.STARTED:
-                        self.poll_service(svc_id)
+                        self.poll_service(sx_id)
 
             # Update our status by querying the Workflow
-            old_wf_status, wf_status = wf_status, self._workflow.status
-            if old_wf_status != wf_status:
-                self._blackboard.log("workflow status: %s", wf_status.value)
+            old_wx_status, wx_status = wx_status, self._workflow.status
+            if old_wx_status != wx_status:
+                self._blackboard.log("%s status: %s", wx_name, wx_status.value)
 
             # Defensive programming: if scheduler has no more job but we think we
             # are still WAITING we would get into a tight infinite loop
-            if not more_jobs and wf_status == Workflow.Status.WAITING:
-                raise Exception('fatal inconsistency between workflow and scheduler')
+            if not more_jobs and wx_status == Workflow.Status.WAITING:
+                raise Exception('fatal inconsistency between %s and scheduler' % wx_name)
 
         # Workflow is done, log result
         str_done = ', '.join(map(lambda s: s.value, self._workflow.list_completed()))
         str_fail = ', '.join(map(lambda s: s.value, self._workflow.list_failed()))
         str_skip = ', '.join(map(lambda s: s.value, self._workflow.list_skipped()))
-        self._blackboard.log("workflow execution completed")
+        self._blackboard.log("%s execution completed", wx_name)
         self._blackboard.log("- done: %s", str_done if str_done else "(none)")
         self._blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
         self._blackboard.log("- skipped: %s", str_skip if str_skip else "(none)")
 
-        return wf_status
+        return wx_status
 
 
-    def start_service(self, svc_id):
-        '''Start the execution of a service.  Actual startup should be asynchronous,
-           but the service shim will return a state we use to update our status.'''
+    def start_service(self, svc_id, wx_id):
+        '''Start the execution of a service within a workflow execution.
+           Actual startup should be asynchronous, but the service shim will
+           return a state we use to update our status.'''
 
         service = self._services.get(svc_id)
         if not service:
             raise ValueError("no implementation for service id: %s" % svc_id.value)
 
+        sx_id = (svc_id, wx_id)
+        sx_name = '%s[%s]' % (svc_id.value,wx_id) if wx_id else svc_id.value
+
         try:
-            execution = service.execute(svc_id.value, self._blackboard, self._scheduler)
-            self._blackboard.log("service start: %s" % svc_id.value)
-            self._executions[svc_id] = execution
-            self.update_state(svc_id, execution.state)
+            if not wx_id:  # backward compatible 1.1.x
+                execution = service.execute(svc_id.value, self._blackboard, self._scheduler)
+            else:
+                execution = service.execute(svc_id.value, wx_id, self._blackboard, self._scheduler, dict())
+
+            self._blackboard.log("service start: %s" % sx_name)
+            self._executions[sx_id] = execution
+            self.update_state(sx_id, execution.state)
 
         except Exception as e:
-            self._blackboard.log("service skipped: %s: %s", svc_id.value, str(e))
-            self._workflow.mark_skipped(svc_id)
+            self._blackboard.log("service skipped: %s: %s", sx_name, str(e))
+            self._workflow.mark_skipped(sx_id[0])
 
 
-    def poll_service(self, svc_id):
-        '''Poll the service for its current status.  This is a non-blocking call on
-           the execution to check whether the backend is done, failed, running.'''
+    def poll_service(self, sx_id):
+        '''Poll the service execution for its current status.  This is a
+           non-blocking call on the execution to check the backend state.'''
 
-        execution = self._executions.get(svc_id)
+        execution = self._executions.get(sx_id)
         if not execution:
-            raise ValueError("no execution for service id: %s" % svc_id.value)
+            sx_name = '%s[%s]' % (sx_id[0].value,sx_id[1]) if sx_id[1] else sx_id[0].value
+            raise ValueError("no such service execution: %s" % sx_name)
 
         old_state = execution.state
         new_state = execution.report()
 
         if new_state != old_state:
-            self.update_state(svc_id, new_state)
+            self.update_state(sx_id, new_state)
 
 
-    def update_state(self, svc_id, state):
+    def update_state(self, sx_id, state):
         '''Update the executing/ed service and workflow with new state.'''
 
-        self._blackboard.log("service state: %s %s", svc_id.value, state.value)
+        svc_id, wx_id = sx_id
+        sx_name = '%s[%s]' % (svc_id.value, wx_id) if wx_id else svc_id.value
+
+        self._blackboard.log("service execution state: %s %s", sx_name, state.value)
         if state == Execution.State.STARTED:
             self._workflow.mark_started(svc_id)
         elif state == Execution.State.COMPLETED:
@@ -246,33 +281,33 @@ class Executor:
         elif state == Execution.State.FAILED:
             self._workflow.mark_failed(svc_id)
         else:
-            raise ValueError("invalid service state for %s: %s" % (svc_id.value, state))
+            raise ValueError("invalid service state for %s: %s" % (sx_name, state))
 
 
-    def assert_cross_check(self):
+    def assert_cross_check(self, wx_id):
         '''Cross check that the state maintained in Workflow matches the state of
            the services our executions.'''
 
         for r in self._workflow.list_runnable():
-            assert r not in self._executions
+            assert (r,wx_id) not in self._executions
 
         for r in self._workflow.list_started():
-            assert self._executions[r].state == Execution.State.STARTED
+            assert self._executions[(r,wx_id)].state == Execution.State.STARTED
         for r in self._workflow.list_failed():
-            assert r not in self._executions or self._executions[r].state == Execution.State.FAILED
+            assert (r,wx_id) not in self._executions or self._executions[(r,wx_id)].state == Execution.State.FAILED
         for r in self._workflow.list_completed():
-            assert r not in self._executions or self._executions[r].state == Execution.State.COMPLETED
+            assert (r,wx_id) not in self._executions or self._executions[(r,wx_id)].state == Execution.State.COMPLETED
         for r in self._workflow.list_skipped():
-            assert r not in self._executions
+            assert (r,wx_id) not in self._executions
 
-        for j in self._executions.keys():
-            state = self._executions[j].state
+        for (i,j) in self._executions.keys():
+            state = self._executions[(i,j)].state
             if state == Execution.State.STARTED:
-                assert j in self._workflow.list_started()
+                assert i in self._workflow.list_started()
             elif state == Execution.State.FAILED:
-                assert j in self._workflow.list_failed()
+                assert i in self._workflow.list_failed()
             elif state == Execution.State.COMPLETED:
-                assert j in self._workflow.list_completed()
+                assert i in self._workflow.list_completed()
             else:
                 assert False, "not a valid state"
 
