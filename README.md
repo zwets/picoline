@@ -35,7 +35,7 @@ background.
 
 ## Documentation
 
-Documentation is in the header comments of the modules:
+Documentation is in the (extensive) header comments of the modules:
 
  * `pico.workflow.logic`: how to define services and their dependencies
  * `pico.workflow.executor`: how to operate the workflow executor
@@ -60,7 +60,7 @@ There is a single dependency (`psutil`) beside the Python3 standard library.
 
 #### Licence
 
-Copyright (c) 2020 Marco van Zwetselaar <io@zwets.it>, KCRI, Tanzania.
+Copyright (c) 2020 Marco van Zwetselaar <io@zwets.it>
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

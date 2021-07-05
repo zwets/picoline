@@ -8,10 +8,12 @@
 #   execution logic became too unwieldy.  They are simple implementations
 #   of a generic workflow definition language and execution engine.
 #
-#   This module defines the Executor and Execution classes.  Execution is
-#   intended to be subclassed by each backend-specific shim.  This subclass
-#   is returned by the shim's Service.execute() implementation.  The subclass
-#   must implement virtual method report() to report its backend status.
+#   This module defines the Executor and Task classes.  A task is a single
+#   Service execution within a Workflow execution.  A Task subclass is
+#   returned by the Service.execute() implementation on the shim.
+#
+#   The Task subclass must implement virtual method report() to report its
+#   backend status.
 #
 # How it works (see pseudo-code below):
 #
@@ -21,13 +23,14 @@
 #
 #   At any time, the Workflow will indicate which services are 'runnable'. The
 #   executor then invokes the execute() method on the service, passing in the
-#   blackboard and job scheduler.  The service returns the Execution object
-#   that the executor monitors.
+#   blackboard and job scheduler.  The service returns the Task object that
+#   the executor monitors.
 #
 #   The Executor polls the scheduler, which polls the backends, for their
-#   updated status, and updates the Workflow accordingly when they complete
-#   or fail.  The Workflow object will then present next runnable services,
-#   until the execution as a whole has completed.
+#   updated status.  Each Task is then queried by the Executor for its current
+#   state.  When a Task completes or fails, the executor updates the Workflow.
+#   The Workflow object may then present next runnable services, until the
+#   workflow execution as a whole has completed.
 #
 #   The implementation is poll-based because the legacy backends run as async
 #   processes, and the Python docs recommend against combining threads and
@@ -49,14 +52,16 @@ import enum
 from .logic import Workflow, Services as ServicesEnum
 
 
-### class Execution
+### class Task
 #
-#   Base class for the service executions, i.e. objects returned from the shims'
-#   execute() method.  Subclasses must implement its report() method to retrieve
-#   the backend status, and wrangle its output on to the black board.
+#   Base class for single service execution in a single workflow execution.
+#   Is return by the service's shim's execute() method.
+#   Subclasses must implement its report() method to retrieve the backend status,
+#   and wrangle its output on to the black board.
 
-class Execution:
-    '''Base class for a single service execution, maintains the execution state.'''
+class Task:
+    '''Base class for a service execution within a workflow execution,
+       maintains the execution state.'''
 
     class State(enum.Enum):
         STARTED = 'STARTED'
@@ -69,41 +74,42 @@ class Execution:
     _error = None   # Set to error string on execution failure
 
     def __init__(self, sid, xid = None):
-        '''Construct an execution with the given service id and workflow id.
-           Without xid, there can be only one workflow invocation, and hence
-           each Service can be invoked only once (as in 1.1.x).'''
+        '''Construct a task of service sid within workflow execution xid.
+           Xid defaults to None to be backward compatible with pre-1.2.0,
+           when there could be only one workflow invocation.'''
         self._sid = sid
         self._xid = xid
 
     @property
     def sid(self):
-        '''Service ID for which this is an execution.'''
+        '''Service ID of which this is an execution.'''
         return self._sid
 
     @property
     def xid(self):
-        '''Workflow execution ID of which this service invocation is part.'''
+        '''Workflow execution ID of which this is a task.'''
         return self._xid
 
     @property
     def id(self):
-        '''Convenience property that returns the tuple (sid,xid).'''
+        '''Unique ID of this Task within the current Executor run.  Is
+           simply the tuple (sid,xid).'''
         return (self._sid, self._xid)
 
     @property
     def ident(self):
-        '''Unique identifier of this service execution within the executor.
-           Equal to sid if xid is None (as in 1.1.x) else string sid[xid].'''
+        '''Human representation of this task: the string sid[xid],
+           or if xid is None (legacy), then just sid.'''
         return self._sid if not self._xid else '%s[%s]' % self.id
 
     @property
     def state(self):
-        '''Current state of the Execution, an Execution.State value.'''
+        '''Current state of the Task, a Task.State value.'''
         return self._state
 
     @property
     def error(self):
-        '''May hold an error string if the execution failed.'''
+        '''May hold an error string if the task failed.'''
         return self._error
 
     def report(self):
@@ -111,26 +117,26 @@ class Execution:
         raise NotImplementedError()
 
     def fail(self, err_fmt, *args):
-        '''Transition this execution to FAILED and set its error message.
-           Invokes self._transition(Execution.State.FAILED, err_fmt % args),
+        '''Transition this task to FAILED and set its error message.
+           Invokes self._transition(Task.State.FAILED, err_fmt % args),
            which will conveniently be the subclass method if overridden.'''
-        return self._transition(Execution.State.FAILED, err_fmt % args)
+        return self._transition(Task.State.FAILED, err_fmt % args)
 
     def done(self):
-        '''Mark this execution COMPLETED.
-           Invokes self._transition(Execution.State.COMPLETED), which will
+        '''Mark this task COMPLETED.
+           Invokes self._transition(Task.State.COMPLETED), which will
            conveniently be the subclass method if overridden .'''
-        return self._transition(Execution.State.COMPLETED)
+        return self._transition(Task.State.COMPLETED)
 
     def _transition(self, new_state, error = None):
-        '''Update execution state to new_state, setting the error iff the new
+        '''Update task state to new_state, setting the error iff the new
            state is FAILED, intended for subclasses to extend.'''
 
-        if new_state == Execution.State.FAILED and not error:
-            raise ValueError('FAILED execution %s must set its error' % self.ident)
+        if new_state == Task.State.FAILED and not error:
+            raise ValueError('FAILED task %s must set its error' % self.ident)
 
         self._state = new_state
-        self._error = error if new_state == Execution.State.FAILED else None
+        self._error = error if new_state == Task.State.FAILED else None
 
         return new_state
 
@@ -146,8 +152,8 @@ class Executor:
     _services = None
     _scheduler = None
 
-    _blackboard = None          # The data exchange mechanism between the services
-    _executions = dict()        # Holds the running and completed service executions
+    _blackboard = None     # The data exchange mechanism between the services
+    _tasks = dict()        # Holds the running and completed service executions
 
 
     def __init__(self, workflow, services, scheduler):
@@ -168,7 +174,7 @@ class Executor:
     def execute(self, blackboard, wx_id = None):
         '''Execute the workflow, optionally with a workflow execution ID.'''
 
-        wx_name = "workflow" if not wx_id else "workflow[%s]" % wx_id
+        wx_name = "workflow execution" if not wx_id else "workflow execution %s" % wx_id
 
         # Create the blackboard for communication between services
         self._blackboard = blackboard
@@ -191,15 +197,15 @@ class Executor:
             if runnable:
                 # Look up the service and start it
                 svc_ident = runnable[0]
-                self.start_service(svc_ident, wx_id)
+                self.start_task(svc_ident, wx_id)
 
             else:
                 # Nothing runnable, wait on the scheduler for job to end
                 more_jobs = self._scheduler.listen()
 
-                # Update all started executions with job state
-                for sx_id, execution in self._executions.items():
-                    if execution.state == Execution.State.STARTED:
+                # Update all started tasks with job state
+                for sx_id, task in self._tasks.items():
+                    if task.state == Task.State.STARTED:
                         self.poll_service(sx_id)
 
             # Update our status by querying the Workflow
@@ -216,7 +222,7 @@ class Executor:
         str_done = ', '.join(map(lambda s: s.value, self._workflow.list_completed()))
         str_fail = ', '.join(map(lambda s: s.value, self._workflow.list_failed()))
         str_skip = ', '.join(map(lambda s: s.value, self._workflow.list_skipped()))
-        self._blackboard.log("%s execution completed", wx_name)
+        self._blackboard.log("%s completed", wx_name)
         self._blackboard.log("- done: %s", str_done if str_done else "(none)")
         self._blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
         self._blackboard.log("- skipped: %s", str_skip if str_skip else "(none)")
@@ -224,7 +230,7 @@ class Executor:
         return wx_status
 
 
-    def start_service(self, svc_id, wx_id):
+    def start_task(self, svc_id, wx_id):
         '''Start the execution of a service within a workflow execution.
            Actual startup should be asynchronous, but the service shim will
            return a state we use to update our status.'''
@@ -233,80 +239,80 @@ class Executor:
         if not service:
             raise ValueError("no implementation for service id: %s" % svc_id.value)
 
-        sx_id = (svc_id, wx_id)
-        sx_name = '%s[%s]' % (svc_id.value,wx_id) if wx_id else svc_id.value
+        tid = (svc_id, wx_id)
+        tident = '%s[%s]' % (svc_id.value,wx_id) if wx_id else svc_id.value
 
         try:
             if not wx_id:  # backward compatible 1.1.x
-                execution = service.execute(svc_id.value, self._blackboard, self._scheduler)
+                task = service.execute(svc_id.value, self._blackboard, self._scheduler)
             else:
-                execution = service.execute(svc_id.value, wx_id, self._blackboard, self._scheduler, dict())
+                task = service.execute(svc_id.value, wx_id, self._blackboard, self._scheduler)
 
-            self._blackboard.log("service start: %s" % sx_name)
-            self._executions[sx_id] = execution
-            self.update_state(sx_id, execution.state)
+            self._blackboard.log("task start: %s" % tident)
+            self._tasks[tid] = task
+            self.update_state(tid, task.state)
 
         except Exception as e:
-            self._blackboard.log("service skipped: %s: %s", sx_name, str(e))
-            self._workflow.mark_skipped(sx_id[0])
+            self._blackboard.log("task skipped: %s: %s", tident, str(e))
+            self._workflow.mark_skipped(tid[0])
 
 
-    def poll_service(self, sx_id):
-        '''Poll the service execution for its current status.  This is a
-           non-blocking call on the execution to check the backend state.'''
+    def poll_service(self, tid):
+        '''Poll the task for its current status.  This is a non-blocking call on
+           the task to check the backend state.'''
 
-        execution = self._executions.get(sx_id)
-        if not execution:
-            sx_name = '%s[%s]' % (sx_id[0].value,sx_id[1]) if sx_id[1] else sx_id[0].value
-            raise ValueError("no such service execution: %s" % sx_name)
+        task = self._tasks.get(tid)
+        if not task:
+            tident = '%s[%s]' % (tid[0].value,tid[1]) if tid[1] else tid[0].value
+            raise ValueError("no such task: %s" % tident)
 
-        old_state = execution.state
-        new_state = execution.report()
+        old_state = task.state
+        new_state = task.report()
 
         if new_state != old_state:
-            self.update_state(sx_id, new_state)
+            self.update_state(tid, new_state)
 
 
-    def update_state(self, sx_id, state):
-        '''Update the executing/ed service and workflow with new state.'''
+    def update_state(self, tid, state):
+        '''Update the executing/ed task and workflow with new state.'''
 
-        svc_id, wx_id = sx_id
-        sx_name = '%s[%s]' % (svc_id.value, wx_id) if wx_id else svc_id.value
+        svc_id, wx_id = tid
+        tident = '%s[%s]' % (svc_id.value, wx_id) if wx_id else svc_id.value
 
-        self._blackboard.log("service execution state: %s %s", sx_name, state.value)
-        if state == Execution.State.STARTED:
+        self._blackboard.log("task state: %s %s", tident, state.value)
+        if state == Task.State.STARTED:
             self._workflow.mark_started(svc_id)
-        elif state == Execution.State.COMPLETED:
+        elif state == Task.State.COMPLETED:
             self._workflow.mark_completed(svc_id)
-        elif state == Execution.State.FAILED:
+        elif state == Task.State.FAILED:
             self._workflow.mark_failed(svc_id)
         else:
-            raise ValueError("invalid service state for %s: %s" % (sx_name, state))
+            raise ValueError("invalid task state for %s: %s" % (tident, state))
 
 
     def assert_cross_check(self, wx_id):
         '''Cross check that the state maintained in Workflow matches the state of
-           the services our executions.'''
+           all tasks.'''
 
         for r in self._workflow.list_runnable():
-            assert (r,wx_id) not in self._executions
+            assert (r,wx_id) not in self._tasks
 
         for r in self._workflow.list_started():
-            assert self._executions[(r,wx_id)].state == Execution.State.STARTED
+            assert self._tasks[(r,wx_id)].state == Task.State.STARTED
         for r in self._workflow.list_failed():
-            assert (r,wx_id) not in self._executions or self._executions[(r,wx_id)].state == Execution.State.FAILED
+            assert (r,wx_id) not in self._tasks or self._tasks[(r,wx_id)].state == Task.State.FAILED
         for r in self._workflow.list_completed():
-            assert (r,wx_id) not in self._executions or self._executions[(r,wx_id)].state == Execution.State.COMPLETED
+            assert (r,wx_id) not in self._tasks or self._tasks[(r,wx_id)].state == Task.State.COMPLETED
         for r in self._workflow.list_skipped():
-            assert (r,wx_id) not in self._executions
+            assert (r,wx_id) not in self._tasks
 
-        for (i,j) in self._executions.keys():
-            state = self._executions[(i,j)].state
-            if state == Execution.State.STARTED:
+        for (i,j) in self._tasks.keys():
+            state = self._tasks[(i,j)].state
+            if state == Task.State.STARTED:
                 assert i in self._workflow.list_started()
-            elif state == Execution.State.FAILED:
+            elif state == Task.State.FAILED:
                 assert i in self._workflow.list_failed()
-            elif state == Execution.State.COMPLETED:
+            elif state == Task.State.COMPLETED:
                 assert i in self._workflow.list_completed()
             else:
                 assert False, "not a valid state"
