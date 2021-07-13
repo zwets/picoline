@@ -274,7 +274,7 @@ class SubprocessScheduler:
         for job in filter(lambda j: j.state == Job.State.RUNNING, self._jobs.values()):
             new_state = job.poll()
             if new_state != Job.State.RUNNING:
-                self.emit('job ended: %s -> %s', job.name, new_state.value.lower())
+                self.emit('job %s: %s', new_state.value.lower(), job.name)
                 self._free_cpu += job.spec.cpu
                 self._free_mem += job.spec.mem
                 self._free_spc += job.spec.spc
