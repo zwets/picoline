@@ -42,9 +42,9 @@
 #      blackboard = .blackboard.Blackboard()
 #      blackboard['inputs'] = { 'contigs': '/path/to/inputs', ... }
 #      workflow = .logic.Workflow(deps, inputs, targets)
-#      executor = .executor.Executor(workflow, services, scheduler)
+#      executor = .executor.Executor(services, scheduler)
 #
-#      status = executor.execute(execution_id, blackboard)
+#      status = executor.execute(workflow, blackboard, execution_id)
 #      results = blackboard.get(...)
 #
 
@@ -73,10 +73,9 @@ class Task:
     _state = None   # Current state of the service execution
     _error = None   # Set to error string on execution failure
 
-    def __init__(self, sid, xid = None):
+    def __init__(self, sid, xid):
         '''Construct a task of service sid within workflow execution xid.
-           Xid defaults to None to be backward compatible with pre-1.2.0,
-           when there could be only one workflow invocation.'''
+           Xid is None when there can be only one workflow invocation.'''
         self._sid = sid
         self._xid = xid
 
@@ -96,11 +95,11 @@ class Task:
            simply the tuple (sid,xid).'''
         return (self._sid, self._xid)
 
-    @property
-    def ident(self):
-        '''Human representation of this task: the string sid[xid],
-           or if xid is None (legacy), then just sid.'''
-        return self._sid if not self._xid else '%s[%s]' % self.id
+#    @property
+#    def id_str(self):
+#        '''Human representation of this task: the string sid[xid],
+#           or if xid is None (legacy), then just sid.'''
+#        return self._sid if not self._xid else '%s[%s]' % self.id
 
     @property
     def state(self):
@@ -133,7 +132,8 @@ class Task:
            state is FAILED, intended for subclasses to extend.'''
 
         if new_state == Task.State.FAILED and not error:
-            raise ValueError('FAILED task %s must set its error' % self.ident)
+            id_str = self._sid if not self._xid else '%s[%s]' % self.id
+            raise ValueError('FAILED task %s must set its error' % id_str)
 
         self._state = new_state
         self._error = error if new_state == Task.State.FAILED else None
@@ -148,70 +148,68 @@ class Task:
 class Executor:
     '''Runs a Workflow from start to end, using a list of Service implementations.'''
 
-    _workflow = None
     _services = None
     _scheduler = None
 
-    _blackboard = None     # The data exchange mechanism between the services
     _tasks = dict()        # Holds the running and completed service executions
 
 
-    def __init__(self, workflow, services, scheduler):
-        '''Construct executor instance to execute the given workflow using the given
-           services (a dict of id -> WorkflowService mappings).'''
+    def __init__(self, services, scheduler):
+        '''Construct executor instance the with the given services
+           (a dict of id -> WorkflowService mappings) and scheduler.'''
 
         # Type check our arguments to avoid confusion
-        assert isinstance (workflow, Workflow)
         for k,v in services.items():
             assert isinstance(k, ServicesEnum)
             assert hasattr(v, 'execute')
 
-        self._workflow = workflow
         self._services = services
         self._scheduler = scheduler
 
 
-    def execute(self, blackboard, wx_id = None):
-        '''Execute the workflow, optionally with a workflow execution ID.'''
+    def execute(self, workflow, blackboard, xid = None):
+        '''Execute the workflow, using the blackboard, with optional execution id.'''
 
-        wx_name = "workflow execution" if not wx_id else "workflow execution %s" % wx_id
+        # Type check our arguments to avoid confusion
+        assert isinstance (workflow, Workflow)
+
+        wx_name = "workflow execution" if not xid else "workflow execution %s" % xid
 
         # Create the blackboard for communication between services
-        self._blackboard = blackboard
-        self._blackboard.log("executor starting %s", wx_name)
+        blackboard.log("executor starting %s", wx_name)
 
         # Obtain the status of the Workflow object to control our execution
-        wx_status = self._workflow.status
-        self._blackboard.log("%s status: %s", wx_name, wx_status.value)
+        wx_status = workflow.status
+        blackboard.log("%s status: %s", wx_name, wx_status.value)
         assert wx_status != Workflow.Status.WAITING, "no services were started yet"
 
         # We run as long as there are runnable or running services in the Workflow
         while wx_status in [ Workflow.Status.RUNNABLE, Workflow.Status.WAITING ]:
 
             # Check that the Workflow and our idea of runnable and running match
-            self.assert_cross_check(wx_id)
+            self.assert_cross_check(workflow, xid)
             more_jobs = True
 
             # Pick the first runnable off the runnables list, if any
-            runnable = self._workflow.list_runnable()
+            runnable = workflow.list_runnable()
             if runnable:
                 # Look up the service and start it
-                svc_ident = runnable[0]
-                self.start_task(svc_ident, wx_id)
+                sid = runnable[0]
+                self.start_task(sid, xid, workflow, blackboard)
 
             else:
                 # Nothing runnable, wait on the scheduler for job to end
                 more_jobs = self._scheduler.listen()
 
                 # Update all started tasks with job state
-                for sx_id, task in self._tasks.items():
+                for tid, task in self._tasks.items():
                     if task.state == Task.State.STARTED:
-                        self.poll_service(sx_id)
+                        self.poll_task(tid, workflow, blackboard)
 
             # Update our status by querying the Workflow
-            old_wx_status, wx_status = wx_status, self._workflow.status
+            old_wx_status, wx_status = wx_status, workflow.status
             if old_wx_status != wx_status:
-                self._blackboard.log("%s status: %s", wx_name, wx_status.value)
+                blackboard.log("%s status: %s", wx_name, wx_status.value)
 
             # Defensive programming: if scheduler has no more job but we think we
             # are still WAITING we would get into a tight infinite loop
@@ -219,101 +217,96 @@ class Executor:
                 raise Exception('fatal inconsistency between %s and scheduler' % wx_name)
 
         # Workflow is done, log result
-        str_done = ', '.join(map(lambda s: s.value, self._workflow.list_completed()))
-        str_fail = ', '.join(map(lambda s: s.value, self._workflow.list_failed()))
-        str_skip = ', '.join(map(lambda s: s.value, self._workflow.list_skipped()))
-        self._blackboard.log("%s completed", wx_name)
-        self._blackboard.log("- done: %s", str_done if str_done else "(none)")
-        self._blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
-        self._blackboard.log("- skipped: %s", str_skip if str_skip else "(none)")
+        str_done = ', '.join(map(lambda s: s.value, workflow.list_completed()))
+        str_fail = ', '.join(map(lambda s: s.value, workflow.list_failed()))
+        str_skip = ', '.join(map(lambda s: s.value, workflow.list_skipped()))
+        blackboard.log("%s completed", wx_name)
+        blackboard.log("- done: %s", str_done if str_done else "(none)")
+        blackboard.log("- failed: %s", str_fail if str_fail else "(none)")
+        blackboard.log("- skipped: %s", str_skip if str_skip else "(none)")
 
         return wx_status
 
 
-    def start_task(self, svc_id, wx_id):
+    def start_task(self, sid, xid, wf, bb):
         '''Start the execution of a service within a workflow execution.
            Actual startup should be asynchronous, but the service shim will
            return a state we use to update our status.'''
 
-        service = self._services.get(svc_id)
+        service = self._services.get(sid)
         if not service:
-            raise ValueError("no implementation for service id: %s" % svc_id.value)
+            raise ValueError("no implementation for service id: %s" % sid.value)
 
-        tid = (svc_id, wx_id)
-        tident = '%s[%s]' % (svc_id.value,wx_id) if wx_id else svc_id.value
+        tid = (sid, xid)
+        tshow = '%s[%s]' % (sid.value,xid) if xid else sid.value
 
         try:
-            if not wx_id:  # backward compatible 1.1.x
-                task = service.execute(svc_id.value, self._blackboard, self._scheduler)
-            else:
-                task = service.execute(svc_id.value, wx_id, self._blackboard, self._scheduler)
-
-            self._blackboard.log("task start: %s" % tident)
+            task = service.execute(sid.value, xid, bb, self._scheduler)
+            bb.log("task start: %s" % tshow)
             self._tasks[tid] = task
-            self.update_state(tid, task.state)
+            self.update_state(wf, tid, task.state, bb)
 
         except Exception as e:
-            self._blackboard.log("task skipped: %s: %s", tident, str(e))
-            self._workflow.mark_skipped(tid[0])
+            bb.log("task skipped: %s: %s", tshow, str(e))
+            wf.mark_skipped(tid[0])
 
 
-    def poll_service(self, tid):
+    def poll_task(self, tid, wf, bb):
         '''Poll the task for its current status.  This is a non-blocking call on
-           the task to check the backend state.'''
+           the task to check the backend state, then update wf if applicable.'''
 
         task = self._tasks.get(tid)
+        tshow = '%s[%s]' % (tid[0].value,tid[1]) if tid[1] else tid[0].value
         if not task:
-            tident = '%s[%s]' % (tid[0].value,tid[1]) if tid[1] else tid[0].value
-            raise ValueError("no such task: %s" % tident)
+            raise ValueError("no such task: %s" % tshow)
 
         old_state = task.state
         new_state = task.report()
 
         if new_state != old_state:
-            self.update_state(tid, new_state)
+            self.update_state(wf, tid, new_state, bb)
 
 
-    def update_state(self, tid, state):
+    def update_state(self, wf, tid, state, bb):
         '''Update the executing/ed task and workflow with new state.'''
 
-        svc_id, wx_id = tid
-        tident = '%s[%s]' % (svc_id.value, wx_id) if wx_id else svc_id.value
+        sid, xid = tid
+        tshow = '%s[%s]' % (sid.value, xid) if xid else sid.value
 
-        self._blackboard.log("task state: %s %s", tident, state.value)
+        bb.log("task state: %s %s", tshow, state.value)
         if state == Task.State.STARTED:
-            self._workflow.mark_started(svc_id)
+            wf.mark_started(sid)
         elif state == Task.State.COMPLETED:
-            self._workflow.mark_completed(svc_id)
+            wf.mark_completed(sid)
         elif state == Task.State.FAILED:
-            self._workflow.mark_failed(svc_id)
+            wf.mark_failed(sid)
         else:
-            raise ValueError("invalid task state for %s: %s" % (tident, state))
+            raise ValueError("invalid task state for %s: %s" % (tshow, state))
 
 
-    def assert_cross_check(self, wx_id):
-        '''Cross check that the state maintained in Workflow matches the state of
-           all tasks.'''
+    def assert_cross_check(self, wf, xid):
+        '''Cross check that the state maintained in wf matches the state of all tasks.'''
 
-        for r in self._workflow.list_runnable():
-            assert (r,wx_id) not in self._tasks
+        for sid in wf.list_runnable():
+            assert (sid,xid) not in self._tasks
 
-        for r in self._workflow.list_started():
-            assert self._tasks[(r,wx_id)].state == Task.State.STARTED
-        for r in self._workflow.list_failed():
-            assert (r,wx_id) not in self._tasks or self._tasks[(r,wx_id)].state == Task.State.FAILED
-        for r in self._workflow.list_completed():
-            assert (r,wx_id) not in self._tasks or self._tasks[(r,wx_id)].state == Task.State.COMPLETED
-        for r in self._workflow.list_skipped():
-            assert (r,wx_id) not in self._tasks
+        for sid in wf.list_started():
+            assert self._tasks[(sid,xid)].state == Task.State.STARTED
+        for sid in wf.list_failed():
+            assert (sid,xid) not in self._tasks or self._tasks[(sid,xid)].state == Task.State.FAILED
+        for sid in wf.list_completed():
+            assert (sid,xid) not in self._tasks or self._tasks[(sid,xid)].state == Task.State.COMPLETED
+        for sid in wf.list_skipped():
+            assert (sid,xid) not in self._tasks
 
-        for (i,j) in self._tasks.keys():
-            state = self._tasks[(i,j)].state
+        for (sid,xid) in self._tasks.keys():
+            state = self._tasks[(sid,xid)].state
             if state == Task.State.STARTED:
-                assert i in self._workflow.list_started()
+                assert sid in wf.list_started()
             elif state == Task.State.FAILED:
-                assert i in self._workflow.list_failed()
+                assert sid in wf.list_failed()
             elif state == Task.State.COMPLETED:
-                assert i in self._workflow.list_completed()
+                assert sid in wf.list_completed()
             else:
                 assert False, "not a valid state"
 
