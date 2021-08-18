@@ -273,7 +273,7 @@ class Executor:
         sid, xid = tid
         tshow = '%s[%s]' % (sid.value, xid) if xid else sid.value
 
-        bb.log("task state: %s %s", tshow, state.value)
+        bb.log("task %s: %s", state.value.lower(), tshow)
         if state == Task.State.STARTED:
             wf.mark_started(sid)
         elif state == Task.State.COMPLETED:
