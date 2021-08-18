@@ -137,43 +137,40 @@ class SubprocessJob(Job):
 
 ### SubprocessScheduler 
 #
-#   SubprocessScheduler spawns a SubprocessJob, a system command that runs in its
-#   own process, using Python's Popen mechanism.
+#   SubprocessScheduler spawns a SubprocessJob, a system command that runs
+#   in its own process, using Python's Popen mechanism.
 
 class SubprocessScheduler:
-    '''Class that runs backend jobs, constrained by cpu, memory, disc space, and
-       run time limits.  Its listen() method periodically polls the backend
-       processes, and returns if any job has changed state.  When it returns false,
-       no more jobs are QUEUED or RUNNING.'''
+    '''Class that runs backend jobs, constrained by cpu, memory, and run time
+       limits.  Its listen() method periodically polls the backend processes,
+       and returns if any job has changed state.  When it returns false, no more
+       jobs are QUEUED or RUNNING.'''
 
     _poll_interval = 5
     _quiet = True
 
     _tot_cpu = None     # count
     _tot_mem = None     # GB
-    _tot_spc = None     # GB
     _tot_tim = None     # seconds
 
     _free_cpu = None
     _free_mem = None
-    _free_spc = None
     _deadline = None
 
     _jobs = dict()
     _dirty = True
 
 
-    def __init__(self, tot_cpu = None, tot_mem = None, tot_spc = None, tot_tim = None,
+    def __init__(self, tot_cpu = None, tot_mem = None, tot_tim = None,
                  poll_interval = 5, quiet = True):
         '''Initialise the job scheduler with the given total number of processors,
-           GB of memory, GB of disc space, and seconds of total wall clock run time.
-           Defaults are: all cpu's, 90% of memory, 80% of disk space, unlimited time.
+           GB of memory, and seconds of total wall clock run time.
+           Defaults are: all cpu's, 90% of memory, unlimited time.
            The poll_interval is the time between backend polls in listen().
            Unset quiet to get updates written to stderr.'''
 
         self._tot_cpu = self._free_cpu = (tot_cpu if tot_cpu else psutil.cpu_count())
         self._tot_mem = self._free_mem = (tot_mem if tot_mem else 0.9 * psutil.virtual_memory().total / 10.0**9)
-        self._tot_spc = self._free_spc = (tot_spc if tot_spc else 0.8 * psutil.disk_usage(os.getcwd()).free / 10.0**9)
         self._tot_tim = tot_tim
         self._poll_interval = poll_interval
         self._quiet = quiet
@@ -205,7 +202,7 @@ class SubprocessScheduler:
         self._jobs[name] = job
 
         # If the job doesn't exceed the overall maxima, try start it
-        if job.spec.cpu > self._tot_cpu or job.spec.mem > self._tot_mem or job.spec.spc > self._tot_spc:
+        if job.spec.cpu > self._tot_cpu or job.spec.mem > self._tot_mem:
             job.fail('job requirements exceed available system resources')
         else:
             self.try_start(job)
@@ -225,14 +222,13 @@ class SubprocessScheduler:
         # On entering listen, if verbose, dump state
         if not self._quiet:
             n_in_state = lambda s: sum(map(lambda x: x.state == s, self._jobs.values()))
-            self.emit('enter listen: queued:%d running:%d done:%d failed:%d (c:%d/%d m:%d/%d s:%d/%d)',
+            self.emit('enter listen: queued:%d running:%d done:%d failed:%d (c:%d/%d m:%d/%d)',
                 n_in_state(Job.State.QUEUED),
                 n_in_state(Job.State.RUNNING),
                 n_in_state(Job.State.COMPLETED),
                 n_in_state(Job.State.FAILED),
                 (self._tot_cpu - self._free_cpu), self._tot_cpu,
-                (self._tot_mem - self._free_mem), self._tot_mem,
-                (self._tot_spc - self._free_spc), self._tot_spc)
+                (self._tot_mem - self._free_mem), self._tot_mem)
 
         # Poll until we become dirty or no QUEUED/RUNNING jobs are left
         while not self._dirty \
@@ -257,12 +253,11 @@ class SubprocessScheduler:
     def try_start(self, job):
         '''Start QUEUED job if its requirements are currently met.'''
 
-        if job.spec.cpu <= self._free_cpu and job.spec.mem <= self._free_mem and job.spec.spc <= self._free_spc:
+        if job.spec.cpu <= self._free_cpu and job.spec.mem <= self._free_mem:
             job.start()
             if job.state == Job.State.RUNNING:
                 self._free_cpu -= job.spec.cpu
                 self._free_mem -= job.spec.mem
-                self._free_spc -= job.spec.spc
             else: # mark ourselves dirty as a job has FAILED/COMPLETED
                 self._dirty = True
 
@@ -277,7 +272,6 @@ class SubprocessScheduler:
                 self.emit('job %s: %s', new_state.value.lower(), job.name)
                 self._free_cpu += job.spec.cpu
                 self._free_mem += job.spec.mem
-                self._free_spc += job.spec.spc
                 self._dirty = True
 
         # If we became dirty, resources have been freed so try starting queued jobs
@@ -370,7 +364,7 @@ if __name__ == '__main__':
         description=textwrap.dedent("""\
             JobSchedulerCLI is a simple command-line tester of the JobScheduler.
             It runs COUNT replicates of CMD with ARGS, taking into account CPU,
-            memory and disc space constraints.
+            memory and run time constraints.
             The job is run in subdirectory NAME, or in arbitrary directory WDIR
             when specified with -w/--wdir.  When there are multiple replicates,
             they run in NAME-{1..COUNT} resp. WDIR-{1..COUNT}.
@@ -382,11 +376,9 @@ if __name__ == '__main__':
     parser.add_argument('-w', '--wdir', metavar='WDIR', default='.', help="work dir base name to run job in [.]")
     parser.add_argument('-c', '--cpu', metavar='N', default=1, help="CPUs required by job [1]")
     parser.add_argument('-m', '--mem', metavar='GB', default=1, help="GB memory required by job [1]")
-    parser.add_argument('-s', '--spc', metavar='GB', default=1, help="GB disc space required by job [1]")
     parser.add_argument('-t', '--tim', metavar='SECS', default=600, help="Maximum job runtime in seconds [600]")
     parser.add_argument('--tot-cpu', metavar='N', type=int, default=None, help="number of CPUs to allocate")
     parser.add_argument('--tot-mem', metavar='GB', type=int, default=None, help="GB of memory to allocate")
-    parser.add_argument('--tot-spc', metavar='GB', type=int, default=None, help="GB of disc space to allocate")
     parser.add_argument('--tot-tim', metavar='SECS', type=int, default=None, help="Maximum total wall clock run time")
     parser.add_argument('-p', '--poll', metavar='SECS', type=int, default=1, help="seconds between backend polls [1]")
     parser.add_argument('-v', '--verbose', action='store_true', help="do not output scheduler verbose output")
@@ -397,12 +389,12 @@ if __name__ == '__main__':
 
     # Create the JobScheduler
     
-    js = SubprocessScheduler(args.tot_cpu, args.tot_mem, args.tot_spc, args.tot_tim, args.poll, not args.verbose)
+    js = SubprocessScheduler(args.tot_cpu, args.tot_mem, args.tot_tim, args.poll, not args.verbose)
     jobs = []
 
     # Schedule the jobs
 
-    jobspec = JobSpec(args.cmd[0], args.args, int(args.cpu), int(args.mem), int(args.spc), int(args.tim))
+    jobspec = JobSpec(args.cmd[0], args.args, int(args.cpu), int(args.mem), int(args.tim))
 
     if args.replicates == 1:
         jobs.append(js.schedule_job(args.name, jobspec, args.wdir))

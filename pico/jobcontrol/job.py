@@ -13,14 +13,13 @@ import enum
 class JobSpec:
     '''Specification of a job: command, arguments, and resource requirements.'''
 
-    def __init__(self, command, args, cpu=1, mem=1, spc=1, tim=0):
+    def __init__(self, command, args, cpu=1, mem=1, tim=0):
         '''Defines the command and argument list, required cpus, GB memory,
-           GB disc space, and maximum wall run time of the job.'''
+           and seconds of maximum wall run time of the job.'''
         self.command = command
         self.args = args
         self.cpu = cpu
         self.mem = mem
-        self.spc = spc
         self.tim = tim
 
     def as_dict(self):
@@ -31,7 +30,6 @@ class JobSpec:
             'resources': {
                 'cpu': self.cpu,
                 'mem': self.mem,
-                'spc': self.spc,
                 'tim': self.tim }
             })
 
