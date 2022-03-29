@@ -9,9 +9,7 @@
 #   invocations based on dependencies between services.
 #
 #   The kcri.bap.workflow module in the BAP (https://github.com/zwets/kcri-cge-bap),
-#   specialises this module for the current version of our BAP.  Likewise, in
-#   the QAP (https://github.com/zwets/kcri-qap) is a specialisation for the KCRI
-#   Quality Analyis Pipeline.
+#   specialises this module for the current version of our BAP.
 #
 # What this module does:
 #
@@ -212,6 +210,20 @@ class ONE(Connector):
             if ret is None:
                 ret = run
         return ret
+
+class FST(Connector):
+    '''Connector with clauses that are tried in order until one succeeds.'''
+
+    def __init__(self, *clauses):
+        self.set_clauses(*clauses)
+
+    def runnables(self, deps, done, wont):
+        '''Return the runnables from the first non-failing clause.'''
+        for sub in self.clauses:
+            run = sub.runnables(deps, done, wont)
+            if run is not None:
+                return run
+        return None
 
 class OPT(Connector):
     '''Unary connector whose clause will be tried but is allowed to fail.'''
