@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 NAME = 'picoline'
-VERSION = '1.4.0'
+VERSION = '1.4.1'
 DESCRIPTION = 'Simplistic workflow and job control for on-machine pipelines'
 LONG_DESCRIPTION = DESCRIPTION
 URL = 'https://github.com/zwets/picoline'
