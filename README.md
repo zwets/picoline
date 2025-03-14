@@ -3,8 +3,7 @@
 _Simplistic workflow and job control for on-machine pipelines_
 
 This Python package contains the generic workflow and job control mechanisms used
-by the [KCRI CGE Bacterial Analysis Pipeline](https://github.com/zwets/kcri-cge-bap)
-and [KCRI QA and Assembly Pipeline](https://github.com/zwets/kcri-qaap).
+by the [CGE Bacterial Analysis Pipeline](https://github.com/zwets/cge-bap).
 
 
 ## Background
@@ -26,10 +25,10 @@ And all of this in pure Python, that is, embeddable in a Python program,
 without further requirements or system dependencies.
 
 The rationale for not building this functionality on top of (the obvious)
-workflow engine a/o job control system is that the BAP and QAAP are intended
-to run on laptops "in the field", rather than on an HPC.
+workflow engine a/o job control system is that the BAP was intended to run
+on laptops "in the field", rather than on an HPC.
 
-See the [BAP](https://github.com/zwets/kcri-cge-bap) documentation for more
+See the [BAP](https://github.com/zwets/cge-bap) documentation for more
 background.
 
 
@@ -45,8 +44,8 @@ Documentation is in the (extensive) header comments of the modules:
    has a `main()` function and can be used from the command-line)
 
 Helpful documentation of a complete use case can be found in the code of the
-[KCRI CGE BAP](https://github.com/zwets/kcri-cge-bap).  The `workflow.py`
-module in that repository has a CLI tester for workflow definitions.
+[CGE BAP](https://github.com/zwets/cge-bap).  The `workflow.py` module in that
+repository has a CLI tester for workflow definitions.
 
 
 ## Installation
@@ -60,7 +59,7 @@ There is a single dependency (`psutil`) beside the Python3 standard library.
 
 #### Licence
 
-Copyright (c) 2020 Marco van Zwetselaar <io@zwets.it>
+Copyright (c) 2020,2025 Marco van Zwetselaar <io@zwets.it>
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

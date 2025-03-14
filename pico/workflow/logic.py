@@ -4,7 +4,7 @@
 #
 # Background
 #
-#   This module was factored out of the KCRI CGE Bacterial Analysis Pipeline,
+#   This module was factored out of the CGE Bacterial Analysis Pipeline,
 #   as it is essentially a generic mechanism to generate a workflow of service
 #   invocations based on dependencies between services.
 #
